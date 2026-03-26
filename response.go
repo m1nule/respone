@@ -1,18 +1,59 @@
 package respone
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+
+	"go.opentelemetry.io/otel/trace"
 )
+
+const TraceHeader = "X-Trace-Id"
 
 // Body 统一响应体
 type Body struct {
-	Code int         `json:"code"`
-	Msg  string      `json:"msg"`
-	Data interface{} `json:"data"`
+	Code  int         `json:"code"`
+	Msg   string      `json:"msg"`
+	Data  interface{} `json:"data"`
+	Trace string      `json:"trace,omitempty"`
 }
 
-// Response 统一响应入口
+// ResponseCtx 带 context 的统一响应入口，自动提取 trace 写入响应头和响应体
+func ResponseCtx(ctx context.Context, w http.ResponseWriter, data interface{}, err error) {
+	traceID := TraceIDFromCtx(ctx)
+	if traceID != "" {
+		w.Header().Set(TraceHeader, traceID)
+	}
+
+	if err == nil {
+		writeJSON(w, http.StatusOK, &Body{
+			Code:  CodeSuccess,
+			Msg:   "ok",
+			Data:  data,
+			Trace: traceID,
+		})
+		return
+	}
+
+	if ce, ok := IsCodeError(err); ok {
+		writeJSON(w, http.StatusOK, &Body{
+			Code:  ce.Code,
+			Msg:   ce.Msg,
+			Data:  struct{}{},
+			Trace: traceID,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, &Body{
+		Code:  CodeServer,
+		Msg:   err.Error(),
+		Data:  struct{}{},
+		Trace: traceID,
+	})
+}
+
+// Response 统一响应入口（不含 trace）
 //   - err == nil: 返回成功，data 为响应数据
 //   - err 为 *CodeError: 使用自定义错误码和消息
 //   - err 为其他 error: 使用默认服务器错误码
@@ -26,7 +67,6 @@ func Response(w http.ResponseWriter, data interface{}, err error) {
 		return
 	}
 
-	// 尝试提取自定义业务错误码
 	if ce, ok := IsCodeError(err); ok {
 		writeJSON(w, http.StatusOK, &Body{
 			Code: ce.Code,
@@ -36,12 +76,20 @@ func Response(w http.ResponseWriter, data interface{}, err error) {
 		return
 	}
 
-	// 未知错误，使用默认错误码
 	writeJSON(w, http.StatusOK, &Body{
 		Code: CodeServer,
 		Msg:  err.Error(),
 		Data: struct{}{},
 	})
+}
+
+// TraceIDFromCtx 从 context 中提取 OpenTelemetry trace ID
+func TraceIDFromCtx(ctx context.Context) string {
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if spanCtx.HasTraceID() {
+		return spanCtx.TraceID().String()
+	}
+	return ""
 }
 
 // Ok 无数据的成功响应
