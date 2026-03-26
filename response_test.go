@@ -1,12 +1,15 @@
 package respone
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestResponse_Success(t *testing.T) {
@@ -106,5 +109,86 @@ func TestHTTPStatus(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+// --- ResponseCtx tests ---
+
+// newTracedCtx 创建携带 trace ID 的 context（用于测试）
+func newTracedCtx(traceHex string) context.Context {
+	tid, _ := trace.TraceIDFromHex(traceHex)
+	sid, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    tid,
+		SpanID:     sid,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(context.Background(), sc)
+}
+
+func TestResponseCtx_TraceInHeader(t *testing.T) {
+	w := httptest.NewRecorder()
+	traceID := "4f96e569df4c0a64b4c55190e44bd94e"
+	ctx := newTracedCtx(traceID)
+
+	ResponseCtx(ctx, w, map[string]string{"ok": "1"}, nil)
+
+	got := w.Header().Get(TraceHeader)
+	if got != traceID {
+		t.Errorf("header %s = %q, want %q", TraceHeader, got, traceID)
+	}
+}
+
+func TestResponseCtx_TraceInBody(t *testing.T) {
+	w := httptest.NewRecorder()
+	traceID := "4f96e569df4c0a64b4c55190e44bd94e"
+	ctx := newTracedCtx(traceID)
+
+	ResponseCtx(ctx, w, nil, nil)
+
+	var body Body
+	json.NewDecoder(w.Body).Decode(&body)
+	if body.Trace != traceID {
+		t.Errorf("body.Trace = %q, want %q", body.Trace, traceID)
+	}
+	if body.Code != CodeSuccess {
+		t.Errorf("code = %d, want %d", body.Code, CodeSuccess)
+	}
+}
+
+func TestResponseCtx_ErrorWithTrace(t *testing.T) {
+	w := httptest.NewRecorder()
+	traceID := "abcdef1234567890abcdef1234567890"
+	ctx := newTracedCtx(traceID)
+
+	ResponseCtx(ctx, w, nil, NewCodeError(CodeAuth, "token无效"))
+
+	got := w.Header().Get(TraceHeader)
+	if got != traceID {
+		t.Errorf("header %s = %q, want %q", TraceHeader, got, traceID)
+	}
+	var body Body
+	json.NewDecoder(w.Body).Decode(&body)
+	if body.Trace != traceID {
+		t.Errorf("body.Trace = %q, want %q", body.Trace, traceID)
+	}
+	if body.Code != CodeAuth {
+		t.Errorf("code = %d, want %d", body.Code, CodeAuth)
+	}
+}
+
+func TestResponseCtx_NoTrace(t *testing.T) {
+	w := httptest.NewRecorder()
+
+	ResponseCtx(context.Background(), w, nil, nil)
+
+	got := w.Header().Get(TraceHeader)
+	if got != "" {
+		t.Errorf("header %s should be empty, got %q", TraceHeader, got)
+	}
+	var body Body
+	json.NewDecoder(w.Body).Decode(&body)
+	if body.Trace != "" {
+		t.Errorf("body.Trace should be empty, got %q", body.Trace)
 	}
 }
